@@ -124,7 +124,3 @@ class TransformerPlayer(Player):
         self.recent_moves.append(move)
         if len(self.recent_moves) > 4:
             self.recent_moves.pop(0)
-    def _update_memory(self, move: str):
-        self.recent_moves.append(move)
-        if len(self.recent_moves) > 4:
-            self.recent_moves.pop(0)
