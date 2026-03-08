@@ -6,88 +6,124 @@ from chess_tournament import Player
 from typing import Optional
 
 class TransformerPlayer(Player):
-    def __init__(self, name: str = "Omer"):
+    def __init__(self, name="Omer-Ultimate"):
         super().__init__(name)
-        model_path = "omerK112345/chessColab1" 
+        model_path = "omerK112345/chessColab1"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_path)
         self.model = GPT2LMHeadModel.from_pretrained(model_path).to(self.device)
         self.model.eval()
-        self.recent_moves = []
-        self.piece_values = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.QUEEN: 9, chess.KING: 0}
 
-    def get_move(self, fen: str) -> Optional[str]:
+        self.recent_moves = []
+
+        self.piece_values = {
+            chess.PAWN: 1,
+            chess.KNIGHT: 3,
+            chess.BISHOP: 3,
+            chess.ROOK: 5,
+            chess.QUEEN: 9,
+            chess.KING: 0
+        }
+
+    def evaluate_board(self, board, root_color):
+        score = 0
+        
+        for piece_type in self.piece_values:
+            score += len(board.pieces(piece_type, chess.WHITE)) * self.piece_values[piece_type]
+            score -= len(board.pieces(piece_type, chess.BLACK)) * self.piece_values[piece_type]
+
+        for square in board.pieces(chess.PAWN, chess.WHITE):
+            rank = chess.square_rank(square)
+            score += rank * 0.5
+            if rank == 6:
+                score += 5
+
+        for square in board.pieces(chess.PAWN, chess.BLACK):
+            rank = 7 - chess.square_rank(square)
+            score -= rank * 0.5
+            if rank == 6:
+                score -= 5
+
+        return score if root_color == chess.WHITE else -score
+
+    def minimax(self, board, depth, maximizing, root_color):
+        if depth == 0 or board.is_game_over():
+            return self.evaluate_board(board, root_color)
+
+        if maximizing:
+            best = -9999
+            for move in board.legal_moves:
+                board.push(move)
+                value = self.minimax(board, depth - 1, False, root_color)
+                board.pop()
+                best = max(best, value)
+            return best
+        else:
+            best = 9999
+            for move in board.legal_moves:
+                board.push(move)
+                value = self.minimax(board, depth - 1, True, root_color)
+                board.pop()
+                best = min(best, value)
+            return best
+
+    def model_score(self, fen, move):
+        text = f"{fen} => {move}"
+        inputs = self.tokenizer(text, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss.item()
+        return -loss
+
+    def get_move(self, fen):
         board = chess.Board(fen)
-        legal_moves_str = [move.uci() for move in board.legal_moves]
-        if not legal_moves_str: return None 
+        root_color = board.turn 
+        legal_moves = list(board.legal_moves)
+        
+        if not legal_moves:
+            return None
+
+        best_move = None
+        best_score = -9999
+
+        for move in legal_moves:
+            move_str = move.uci()
             
-        for move in board.legal_moves:
+            if move_str in self.recent_moves and len(legal_moves) > 1:
+                continue
+
             board.push(move)
+
             if board.is_checkmate():
                 board.pop()
-                self._update_memory(move.uci())
-                return move.uci()
+                self._update_memory(move_str)
+                return move_str
+
+            search_score = self.minimax(board, 2, False, root_color)
+            transformer_score = self.model_score(fen, move_str)
+            total_score = search_score + transformer_score
+
+            if move.promotion:
+                total_score += 9
+
             board.pop()
-        
-        prompt = f"{fen} => "
-        inputs = self.tokenizer.encode(prompt, return_tensors="pt").to(self.device)
-        
-        with torch.no_grad():
-            outputs = self.model.generate(
-                inputs, max_new_tokens=5, pad_token_id=self.tokenizer.eos_token_id,
-                num_beams=5, num_return_sequences=5, early_stopping=True
-            )
-            
-        for output in outputs:
-            decoded = self.tokenizer.decode(output, skip_special_tokens=True)
-            try: predicted_move = decoded.split("=>")[1].strip()[:5].strip()
-            except IndexError: continue
+
+            if total_score > best_score:
+                best_score = total_score
+                best_move = move_str
                 
-            if predicted_move in legal_moves_str:
-                if predicted_move in self.recent_moves and len(legal_moves_str) > 1:
-                    continue
-                    
-                move_obj = chess.Move.from_uci(predicted_move)
-                board.push(move_obj)
-                opponent_can_mate = False
-                
-                if not board.is_checkmate():
-                    for opp_move in board.legal_moves:
-                        board.push(opp_move)
-                        if board.is_checkmate(): opponent_can_mate = True
-                        board.pop()
-                        if opponent_can_mate: break
-                            
-                board.pop() 
-                if not opponent_can_mate:
-                    self._update_memory(predicted_move)
-                    return predicted_move
-                    
-        best_fallback = None
-        best_score = -1
-        
-        for move in board.legal_moves:
-            move_str = move.uci()
-            if move_str in self.recent_moves and len(legal_moves_str) > 1: continue 
-                
-            score = 0
-            if board.is_capture(move):
-                target = board.piece_at(move.to_square)
-                if target: score += self.piece_values.get(target.piece_type, 0)
-            if move.promotion == chess.QUEEN: score += 9
-                
-            if score >= best_score:
-                best_score = score
-                best_fallback = move_str
-                
-        if best_fallback and best_score > 0:
-            self._update_memory(best_fallback)
-            return best_fallback
+        if best_move:
+            self._update_memory(best_move)
+            return best_move
         else:
-            fallback = random.choice(legal_moves_str)
+            fallback = random.choice([m.uci() for m in legal_moves])
             self._update_memory(fallback)
             return fallback
 
+    def _update_memory(self, move: str):
+        self.recent_moves.append(move)
+        if len(self.recent_moves) > 4:
+            self.recent_moves.pop(0)
     def _update_memory(self, move: str):
         self.recent_moves.append(move)
         if len(self.recent_moves) > 4:
