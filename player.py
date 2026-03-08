@@ -6,7 +6,7 @@ from chess_tournament import Player
 from typing import Optional
 
 class TransformerPlayer(Player):
-    def __init__(self, name="Omer-Ultimate"):
+    def __init__(self, name="Omer"):
         super().__init__(name)
         model_path = "omerK112345/chessColab1"
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
